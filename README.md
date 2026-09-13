@@ -1,13 +1,3 @@
----
-title: CricCircle AI Service
-emoji: 🏏
-colorFrom: green
-colorTo: blue
-sdk: docker
-app_port: 8001
-pinned: false
----
-
 # CricCircle AI Service
 
 AI-powered cricket highlight detection system.
@@ -92,23 +82,30 @@ python app/ml/training/train_classifier.py --data dataset/classifier --epochs 50
 13. NestJS webhook called with results
 14. Flutter app shows AI Review screen
 
-## Deployment (free demo hosting: Hugging Face Spaces)
+## Deployment (free demo hosting: Render)
 
-This repo is set up to deploy as-is to a Hugging Face Space using the
-Docker SDK (see the front matter at the top of this file).
+This repo deploys as-is to a Render free Web Service from this
+Dockerfile.
 
-1. Create a Space at huggingface.co/new-space with **SDK: Docker**
-   and hardware **CPU basic** (free).
-2. In the Space's **Settings -> Repository secrets**, set:
+1. Push this repo to a GitHub repository.
+2. On Render, create a new **Web Service**, connect that GitHub
+   repo, and choose **Docker** as the runtime (auto-detected from
+   this Dockerfile) and the **Free** instance type.
+3. Set **Health Check Path** to `/health`.
+4. Under **Environment**, add:
    `DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
    `NESTJS_WEBHOOK_SECRET` (placeholder values are fine -- none of
    these are actually used while `USE_S3=false`), plus
    `USE_S3=false`, `USE_LOCAL_STORE=true`, and `PUBLIC_BASE_URL` set
-   to the Space's own URL (`https://<user>-<space>.hf.space`).
-3. Push this repo to the Space's git remote (shown on the Space
-   page) to trigger a build.
-4. Once built, the API is live at that same public URL --
-   `/health` and `/docs` should respond immediately.
+   to the service's own URL (`https://<service-name>.onrender.com`).
+5. Deploy. Free-tier RAM is fixed at 512MB, which is tight for the
+   torch/opencv/librosa stack -- if the first boot gets OOM-killed,
+   check the logs and see the "Free-tier RAM gotcha" note below.
+6. Once live, `/health` and `/docs` should respond at that same
+   public URL. Free instances spin down after ~15 min with no
+   incoming requests and cold-start on the next one (~30-60s) --
+   fine for a demo, and status polling during active processing
+   keeps the instance alive so it won't spin down mid-job.
 
 ## Project Structure
 
