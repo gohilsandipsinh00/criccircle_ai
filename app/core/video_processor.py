@@ -1,3 +1,4 @@
+import gc
 import os
 import shutil
 import tempfile
@@ -36,15 +37,36 @@ class CricketVideoProcessor:
     def __init__(self):
         self.ffmpeg = FFmpegUtils()
         self.audio_analyzer = AudioAnalyzer()
-        self.yolo_model = CricketYOLOModel()
-        self.classifier = CricketEventClassifier()
         self.s3_service = S3Service()
+        # YOLO and the ResNet50 classifier are loaded lazily (see the
+        # properties below) instead of here. This class is instantiated
+        # once at app startup as a module-level singleton, so eager
+        # construction meant both models -- torch nn.Modules, the
+        # classifier alone is ~100MB of float32 weights -- sat resident
+        # in memory for the entire life of the process, whether or not
+        # a video was ever processed. On a fixed 512MB host that ate
+        # into the headroom the (also memory-hungry) audio-analysis
+        # step needed, and contributed to an OOM kill mid-request.
+        self._yolo_model: Optional[CricketYOLOModel] = None
+        self._classifier: Optional[CricketEventClassifier] = None
 
         self.clip_duration = (
             settings.highlight_clip_duration
         )
         self.frames_per_second = settings.frames_per_second
         self.min_confidence = settings.confidence_threshold
+
+    @property
+    def yolo_model(self) -> CricketYOLOModel:
+        if self._yolo_model is None:
+            self._yolo_model = CricketYOLOModel()
+        return self._yolo_model
+
+    @property
+    def classifier(self) -> CricketEventClassifier:
+        if self._classifier is None:
+            self._classifier = CricketEventClassifier()
+        return self._classifier
 
     async def process(
         self,
@@ -128,6 +150,13 @@ class CricketVideoProcessor:
                 f"potential moments"
             )
 
+            # analyze() builds several full-length waveform/spectrogram
+            # arrays that go out of scope on return; force a prompt
+            # collect before the YOLO model (loaded lazily, right
+            # below) adds its own footprint on top -- this handoff is
+            # what was OOM-killing the process on 512MB hosts.
+            gc.collect()
+
             await self._update_progress(
                 progress_callback, 40,
                 "Detecting cricket moments..."
@@ -149,6 +178,7 @@ class CricketVideoProcessor:
             frame_detections = self.yolo_model.detect_batch(
                 frames, batch_size=16
             )
+            gc.collect()
 
             await self._update_progress(
                 progress_callback, 60,
