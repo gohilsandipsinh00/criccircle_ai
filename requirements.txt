@@ -3,15 +3,15 @@ fastapi==0.109.2
 uvicorn[standard]==0.27.1
 python-multipart==0.0.9
 
-# ML & Computer Vision
-# NOTE: original pins (ultralytics==8.1.28, torch==2.2.0, torchvision==0.17.0,
-# numpy==1.26.4) do not ship wheels for Python 3.13, which is what's
-# installed on this machine. Bumped to the oldest versions with 3.13 wheels.
-# If you run this on Python 3.11 you can pin back to the original versions.
-ultralytics>=8.3.0
-torch==2.6.0
-torchvision==0.21.0
-opencv-python-headless==4.10.0.84
+# ML inference (ONNX Runtime -- NOT torch/torchvision/ultralytics/
+# opencv). torch alone costs 300-500MB just to import, which is more
+# memory than an entire free-tier host's budget; the deployed service
+# runs YOLO + the classifier as plain ONNX models instead (see
+# app/ml/models/yolo_model.py, classifier_model.py). Training still
+# needs the full torch stack -- see requirements-train.txt, installed
+# separately, only for local/Colab training and model export, never
+# on the deployed service.
+onnxruntime>=1.19.0
 Pillow>=10.4.0
 numpy>=1.26.4
 scipy==1.14.1
@@ -68,4 +68,3 @@ python-jose==3.3.0
 passlib==1.7.4
 aiofiles==23.2.1
 tqdm==4.66.2
-pandas>=2.2.3

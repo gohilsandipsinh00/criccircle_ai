@@ -1,17 +1,18 @@
 import os
-import torch
-import torch.nn as nn
-import torchvision.models as models
-import torchvision.transforms as transforms
-from PIL import Image
 from typing import Dict, List
+
+import numpy as np
+from PIL import Image
+
 from app.config import settings
 from app.utils.logger import log
 
 
 class CricketEventClassifier:
     """
-    ResNet50-based event classifier.
+    Event classifier, run via onnxruntime rather than torch/
+    torchvision (see yolo_model.py for why -- torch's import cost
+    alone is more memory than an entire free-tier host's budget).
 
     Classifies cricket moments into:
       0: SIX
@@ -20,6 +21,15 @@ class CricketEventClassifier:
       3: CATCH
       4: CELEBRATION
       5: NORMAL_PLAY
+
+    No trained classifier exists yet (training produces a .pth
+    checkpoint today -- export it with torch.onnx.export() once
+    trained, see app/ml/training/train_classifier.py). Until then,
+    this class has nothing to load and every call returns "unknown"
+    with 0 confidence, same as its previous random-weight-ResNet50
+    fallback effectively did (random weights = meaningless output) --
+    the difference is this version doesn't spend ~100MB of RAM to
+    produce that same meaningless output.
     """
 
     CLASS_NAMES = {
@@ -28,7 +38,7 @@ class CricketEventClassifier:
         2: "wicket",
         3: "catch",
         4: "celebration",
-        5: "normal_play"
+        5: "normal_play",
     }
 
     DISPLAY_NAMES = {
@@ -37,105 +47,77 @@ class CricketEventClassifier:
         "wicket": "WICKET \U0001F3AF",
         "catch": "CATCH \U0001F64C",
         "celebration": "CELEBRATION \U0001F389",
-        "normal_play": "Normal Play"
+        "normal_play": "Normal Play",
     }
 
-    # Standard ImageNet normalization
-    TRANSFORM = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
+    INPUT_SIZE = 224
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
     def __init__(self):
-        self.model = None
-        self.device = torch.device(
-            "cuda" if (
-                settings.use_gpu and
-                torch.cuda.is_available()
-            )
-            else "cpu"
-        )
+        self.session = None
         self.model_path = settings.classifier_model_path
         self._load_model()
 
-    def _build_model(self) -> nn.Module:
-        """Build ResNet50 with custom head"""
-        model = models.resnet50(weights=None)
-
-        # Custom classification head
-        model.fc = nn.Sequential(
-            nn.Dropout(p=0.5),
-            nn.Linear(2048, 512),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(512, 6)  # 6 event classes
-        )
-        return model
-
     def _load_model(self):
-        """Load trained ResNet50 classifier"""
+        """Load an ONNX classifier if a trained one exists."""
         try:
-            self.model = self._build_model()
-
-            if os.path.exists(self.model_path):
-                log.info(
-                    f"Loading classifier: {self.model_path}"
-                )
-                state_dict = torch.load(
-                    self.model_path,
-                    map_location=self.device
-                )
-                self.model.load_state_dict(state_dict)
-                log.info("Classifier loaded successfully")
-            else:
+            if not os.path.exists(self.model_path):
                 log.warning(
-                    "Classifier model not found. "
-                    "Using random weights (train first!)"
+                    f"Classifier model not found at {self.model_path}. "
+                    f"Skipping event classification until trained + "
+                    f"exported (train_classifier.py, then "
+                    f"torch.onnx.export)."
                 )
+                return
 
-            self.model.to(self.device)
-            self.model.eval()
+            import onnxruntime as ort
+
+            self.session = ort.InferenceSession(
+                self.model_path, providers=["CPUExecutionProvider"]
+            )
+            self.input_name = self.session.get_inputs()[0].name
+            log.info(f"Classifier loaded successfully from {self.model_path}")
 
         except Exception as e:
             log.error(f"Failed to load classifier: {e}")
-            self.model = None
+            self.session = None
 
-    def classify_frame(
-        self,
-        frame_path: str
-    ) -> Dict:
-        """Classify a single frame"""
-        if self.model is None:
+    def _preprocess(self, image: Image.Image) -> np.ndarray:
+        resized = image.convert("RGB").resize(
+            (self.INPUT_SIZE, self.INPUT_SIZE), Image.BILINEAR
+        )
+        arr = np.asarray(resized, dtype=np.float32) / 255.0
+        arr = (arr - self.IMAGENET_MEAN) / self.IMAGENET_STD
+        arr = arr.transpose(2, 0, 1)[np.newaxis, ...]  # HWC -> NCHW
+        return np.ascontiguousarray(arr, dtype=np.float32)
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        exp = np.exp(logits - np.max(logits))
+        return exp / exp.sum()
+
+    def classify_frame(self, frame_path: str) -> Dict:
+        """Classify a single frame."""
+        if self.session is None:
             return {
                 "event_type": "unknown",
                 "confidence": 0.0,
-                "all_scores": {}
+                "all_scores": {},
             }
 
         try:
-            image = Image.open(frame_path).convert("RGB")
-            tensor = self.TRANSFORM(image).unsqueeze(0)
-            tensor = tensor.to(self.device)
+            image = Image.open(frame_path)
+            tensor = self._preprocess(image)
+            logits = self.session.run(
+                None, {self.input_name: tensor}
+            )[0][0]
+            probabilities = self._softmax(logits)
 
-            with torch.no_grad():
-                outputs = self.model(tensor)
-                probabilities = torch.softmax(outputs, dim=1)
-                confidence, predicted = torch.max(
-                    probabilities, 1
-                )
-
-            class_id = predicted.item()
-            conf = confidence.item()
-
-            # All class scores
+            class_id = int(np.argmax(probabilities))
+            conf = float(probabilities[class_id])
             all_scores = {
-                self.CLASS_NAMES[i]: float(
-                    probabilities[0][i]
-                )
+                self.CLASS_NAMES[i]: float(probabilities[i])
                 for i in range(6)
             }
 
@@ -145,75 +127,50 @@ class CricketEventClassifier:
                 "all_scores": all_scores,
                 "display_name": self.DISPLAY_NAMES.get(
                     self.CLASS_NAMES[class_id], "Unknown"
-                )
+                ),
             }
 
         except Exception as e:
-            log.error(
-                f"Classification error on {frame_path}: {e}"
-            )
+            log.error(f"Classification error on {frame_path}: {e}")
             return {
                 "event_type": "unknown",
                 "confidence": 0.0,
-                "all_scores": {}
+                "all_scores": {},
             }
 
-    def classify_clip_frames(
-        self,
-        frame_paths: List[str]
-    ) -> Dict:
+    def classify_clip_frames(self, frame_paths: List[str]) -> Dict:
         """
         Classify multiple frames from a clip.
         Returns aggregated prediction for the clip.
         """
-        if not frame_paths:
-            return {
-                "event_type": "unknown",
-                "confidence": 0.0
-            }
+        if not frame_paths or self.session is None:
+            return {"event_type": "unknown", "confidence": 0.0}
 
-        predictions = []
-        for fp in frame_paths:
-            pred = self.classify_frame(fp)
-            if pred["event_type"] != "unknown":
-                predictions.append(pred)
+        predictions = [
+            self.classify_frame(fp) for fp in frame_paths
+        ]
+        predictions = [
+            p for p in predictions if p["event_type"] != "unknown"
+        ]
 
         if not predictions:
-            return {
-                "event_type": "unknown",
-                "confidence": 0.0
-            }
+            return {"event_type": "unknown", "confidence": 0.0}
 
-        # Aggregate: sum scores across all frames
         score_sums = {cls: 0.0 for cls in self.CLASS_NAMES.values()}
         for pred in predictions:
             for cls, score in pred["all_scores"].items():
-                score_sums[cls] = (
-                    score_sums.get(cls, 0.0) + score
-                )
+                score_sums[cls] = score_sums.get(cls, 0.0) + score
 
-        # Normalize
         total = sum(score_sums.values())
         if total > 0:
-            score_sums = {
-                k: v / total
-                for k, v in score_sums.items()
-            }
+            score_sums = {k: v / total for k, v in score_sums.items()}
 
-        # Get best class
         best_class = max(score_sums, key=score_sums.get)
         best_confidence = score_sums[best_class]
 
-        # Ignore normal_play results < 0.7 threshold
-        if (
-            best_class == "normal_play" and
-            best_confidence < 0.7
-        ):
-            # Get second best
+        if best_class == "normal_play" and best_confidence < 0.7:
             sorted_scores = sorted(
-                score_sums.items(),
-                key=lambda x: x[1],
-                reverse=True
+                score_sums.items(), key=lambda x: x[1], reverse=True
             )
             if len(sorted_scores) > 1:
                 best_class = sorted_scores[1][0]
@@ -224,7 +181,5 @@ class CricketEventClassifier:
             "confidence": best_confidence,
             "all_scores": score_sums,
             "frames_analyzed": len(predictions),
-            "display_name": self.DISPLAY_NAMES.get(
-                best_class, "Unknown"
-            )
+            "display_name": self.DISPLAY_NAMES.get(best_class, "Unknown"),
         }

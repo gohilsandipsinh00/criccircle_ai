@@ -6,14 +6,45 @@ from uploaded cricket match videos.
 
 ## Tech Stack
 - FastAPI (Python web framework)
-- YOLOv8 (object detection)
-- ResNet50 (event classification)
+- YOLOv8 (object detection) + ResNet50 (event classification), run
+  via **ONNX Runtime**, not torch/torchvision -- the deployed service
+  never installs the full torch stack (see "Model inference" below)
 - FFmpeg (video processing)
 - librosa (audio analysis)
 - AWS S3 (video storage)
 - Firebase FCM (push notifications)
 - Redis (job queue)
 - PostgreSQL (results database)
+
+## Model inference vs. training (two different dependency sets)
+
+The deployed service (`requirements.txt`) runs inference through
+`onnxruntime` only -- no `torch`, no `ultralytics`, no `opencv`.
+`torch` alone costs 300-500MB just to import, which is more memory
+than an entire free-tier host's budget, so it has no place in the
+running service.
+
+Training and ONNX export still need the full stack
+(`requirements-train.txt`, installed separately, only for local/Colab
+work):
+```bash
+pip install -r requirements.txt -r requirements-train.txt
+```
+After training a model (`app/ml/training/train_yolo.py` /
+`train_classifier.py`), export it to ONNX before deploying:
+```python
+# YOLO
+from ultralytics import YOLO
+YOLO("runs/detect/cricket_yolo_v1/weights/best.pt").export(format="onnx")
+
+# Classifier
+torch.onnx.export(model, dummy_input, "cricket_classifier_v1.onnx")
+```
+Place the resulting `.onnx` file at the path configured by
+`YOLO_MODEL_PATH` / `CLASSIFIER_MODEL_PATH` -- the service prefers a
+trained model there automatically over the bundled COCO-pretrained
+`models/yolo/yolov8n_fallback.onnx` fallback (and simply skips event
+classification entirely until a trained classifier exists).
 
 ## Quick Start
 
@@ -44,6 +75,12 @@ uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 http://localhost:8001/docs
 
 ## Model Training
+
+Install the training-only dependencies first (not needed to run the
+service itself):
+```bash
+pip install -r requirements-train.txt
+```
 
 ### Train YOLO (object detection)
 ```bash

@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-import torch
+import onnxruntime as ort
 from app.config import settings
 
 router = APIRouter(tags=["health"])
@@ -7,16 +7,15 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health")
 async def health_check():
+    providers = ort.get_available_providers()
+    gpu_available = "CUDAExecutionProvider" in providers
     return {
         "status": "healthy",
         "service": "CricCircle AI Service",
         "version": settings.app_version,
-        "gpu_available": torch.cuda.is_available(),
-        "gpu_name": (
-            torch.cuda.get_device_name(0)
-            if torch.cuda.is_available()
-            else "CPU mode"
-        ),
+        "gpu_available": gpu_available,
+        "gpu_name": "CUDA (onnxruntime)" if gpu_available else "CPU mode",
+        "onnx_providers": providers,
     }
 
 

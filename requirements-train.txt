@@ -1,0 +1,17 @@
+# Training and ONNX export dependencies ONLY.
+#
+# This is NOT installed by the deployed service (see requirements.txt,
+# which runs inference via onnxruntime instead). Install this
+# separately for local/Colab work under app/ml/training/ and
+# app/ml/models/download_models.py:
+#
+#   pip install -r requirements.txt -r requirements-train.txt
+
+torch==2.6.0
+torchvision==0.21.0
+ultralytics>=8.3.0
+opencv-python-headless==4.10.0.84
+onnx>=1.16.0
+onnxslim>=0.1.82
+scikit-learn
+matplotlib

@@ -1,13 +1,11 @@
 FROM python:3.11-slim
 
-# Install system dependencies including FFmpeg
+# Install system dependencies including FFmpeg.
+# (libgl1/libglib2.0-0/libsm6/libxext6/libxrender-dev were only ever
+# needed by opencv -- dropped along with torch/ultralytics/opencv in
+# favor of onnxruntime, see requirements.txt.)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
     libgomp1 \
     gcc \
     g++ \
@@ -15,16 +13,13 @@ RUN apt-get update && apt-get install -y \
 
 # Most managed container platforms (Render, HF Spaces, Cloud Run)
 # run the container as a non-root user and only guarantee write
-# access under that user's home directory -- so the app, its writable
-# data dirs, and every library that caches config/state (ultralytics,
-# matplotlib) all need to live under /home/user instead of /app as
-# root.
+# access under that user's home directory -- so the app and its
+# writable data dirs need to live under /home/user instead of /app
+# as root.
 RUN useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH \
-    YOLO_CONFIG_DIR=/home/user/.config/Ultralytics \
-    MPLCONFIGDIR=/home/user/.config/matplotlib
+    PATH=/home/user/.local/bin:$PATH
 
 WORKDIR /home/user/app
 

@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     nestjs_backend_url: str = "http://localhost:3000"
     nestjs_webhook_secret: str
 
-    # ML Models
-    yolo_model_path: str = "./models/yolo/cricket_yolo_v1.pt"
+    # ML Models (ONNX Runtime, not torch -- see app/ml/models/*.py)
+    yolo_model_path: str = "./models/yolo/cricket_yolo_v1.onnx"
     classifier_model_path: str = \
-        "./models/classifier/cricket_classifier_v1.pth"
+        "./models/classifier/cricket_classifier_v1.onnx"
     use_gpu: bool = False
     confidence_threshold: float = 0.65
 
