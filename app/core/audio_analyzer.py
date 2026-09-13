@@ -1,8 +1,17 @@
+import concurrent.futures
 import numpy as np
 import librosa
 from typing import List, Dict
 from app.config import settings
 from app.utils.logger import log
+
+# A 38-second clip hung inside librosa.load() itself for 8+ minutes on
+# Render's free tier without erroring -- root cause unconfirmed (likely
+# a fallback audio decoder backend misbehaving in that container), but
+# whatever it is, no single video should be able to wedge the whole
+# job forever. Bound it with a hard timeout and degrade to visual-only
+# detection rather than hang.
+AUDIO_ANALYSIS_TIMEOUT_SECONDS = 45
 
 
 class AudioAnalyzer:
@@ -27,9 +36,40 @@ class AudioAnalyzer:
         audio_path: str
     ) -> List[Dict]:
         """
-        Main analysis function.
-        Returns list of detected highlight timestamps.
+        Main analysis function, with a hard timeout. If audio analysis
+        hangs or fails, callers still get a (possibly empty) list back
+        -- the pipeline treats this as one signal among several
+        (combined with YOLO visual detections), so degrading to
+        visual-only is a safe fallback rather than blocking the whole
+        video.
         """
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._analyze_impl, audio_path)
+        try:
+            return future.result(timeout=AUDIO_ANALYSIS_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            log.error(
+                f"Audio analysis timed out after "
+                f"{AUDIO_ANALYSIS_TIMEOUT_SECONDS}s on {audio_path} -- "
+                f"continuing with visual-only detection. (The stuck "
+                f"worker thread is abandoned, not killed -- Python "
+                f"can't force-terminate a thread -- but the job moves "
+                f"on instead of hanging.)"
+            )
+            return []
+        except Exception as e:
+            log.error(f"Audio analysis failed: {str(e)}")
+            return []
+        finally:
+            # wait=False: don't block here waiting for a possibly
+            # still-hung worker thread to finish.
+            executor.shutdown(wait=False)
+
+    def _analyze_impl(
+        self,
+        audio_path: str
+    ) -> List[Dict]:
+        """The actual analysis, run on a worker thread by analyze()."""
         log.info(f"Analyzing audio: {audio_path}")
 
         try:
@@ -39,6 +79,7 @@ class AudioAnalyzer:
                 sr=22050,    # Standard sample rate
                 mono=True    # Convert to mono
             )
+            log.info("librosa.load() returned")
 
             duration = len(audio) / sample_rate
             log.info(
