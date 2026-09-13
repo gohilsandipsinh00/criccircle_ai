@@ -17,11 +17,18 @@ RUN apt-get update && apt-get install -y \
 # writable data dirs need to live under /home/user instead of /app
 # as root.
 RUN useradd -m -u 1000 user
+
+# WORKDIR creates its directory as root even with USER already set
+# below it -- chown it explicitly while still root, or the non-root
+# user can create files here (via COPY, which runs with elevated
+# privileges regardless of USER) but can't create brand-new
+# subdirectories of its own (e.g. the mkdir -p further down).
+WORKDIR /home/user/app
+RUN chown -R user:user /home/user/app
+
 USER user
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH
-
-WORKDIR /home/user/app
 
 # Install Python dependencies (--user since we're not root)
 COPY --chown=user requirements.txt .
